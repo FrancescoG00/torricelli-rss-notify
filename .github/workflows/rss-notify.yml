@@ -1,0 +1,164 @@
+name: Controllo circolari Torricelli
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  check-rss:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Scarica cache precedente
+        uses: actions/cache/restore@v4
+        with:
+          path: .rss-state
+          key: rss-state-${{ github.ref_name }}
+          restore-keys: |
+            rss-state-
+
+      - name: Controlla RSS e invia notifiche
+        env:
+          NTFY_TOPIC: torricelli_circolari_8f4k29m7x5q1z6
+        run: |
+          python3 - <<'PY'
+          import urllib.request
+          import xml.etree.ElementTree as ET
+          import os
+          import json
+          from pathlib import Path
+
+          RSS_URL = "https://torricellimi.edu.it/feed/circolari.rss"
+          TOPIC = os.environ["NTFY_TOPIC"]
+
+          STATE_DIR = Path(".rss-state")
+          STATE_DIR.mkdir(exist_ok=True)
+
+          STATE_FILE = STATE_DIR / "seen.json"
+
+          # Scarica il feed RSS
+          request = urllib.request.Request(
+              RSS_URL,
+              headers={
+                  "User-Agent": "Mozilla/5.0 (RSS monitor)"
+              }
+          )
+
+          with urllib.request.urlopen(request, timeout=30) as response:
+              data = response.read()
+
+          root = ET.fromstring(data)
+
+          # Legge tutte le pubblicazioni presenti nel feed
+          items = root.findall(".//item")
+
+          current = []
+
+          for item in items:
+              title = item.findtext("title", "").strip()
+              link = item.findtext("link", "").strip()
+              guid = item.findtext("guid", "").strip()
+
+              identifier = guid or link or title
+
+              if identifier:
+                  current.append({
+                      "id": identifier,
+                      "title": title,
+                      "link": link
+                  })
+
+          print(f"Elementi trovati nel feed: {len(current)}")
+
+          if not current:
+              print("Il feed non contiene elementi.")
+              raise SystemExit(0)
+
+          # Carica lo stato precedente
+          if STATE_FILE.exists():
+              try:
+                  seen = set(json.loads(STATE_FILE.read_text()))
+              except Exception:
+                  seen = set()
+          else:
+              seen = set()
+
+          # Prima esecuzione:
+          # memorizziamo le circolari già esistenti senza
+          # inviare notifiche per quelle vecchie.
+          if not STATE_FILE.exists():
+              seen = {item["id"] for item in current}
+
+              STATE_FILE.write_text(
+                  json.dumps(list(seen), ensure_ascii=False)
+              )
+
+              print(
+                  f"Prima esecuzione: memorizzate "
+                  f"{len(seen)} circolari senza notifiche."
+              )
+
+          else:
+              new_items = [
+                  item for item in current
+                  if item["id"] not in seen
+              ]
+
+              if not new_items:
+                  print("Nessuna nuova circolare.")
+
+              else:
+                  print(
+                      f"Nuove circolari trovate: "
+                      f"{len(new_items)}"
+                  )
+
+                  # Invia prima le più vecchie e poi le più recenti
+                  for item in reversed(new_items):
+
+                      title = item["title"]
+                      link = item["link"]
+
+                      message = f"{title}\n{link}"
+
+                      request = urllib.request.Request(
+                          f"https://ntfy.sh/{TOPIC}",
+                          data=message.encode("utf-8"),
+                          method="POST",
+                          headers={
+                              "Title": "Nuova circolare Torricelli",
+                              "Priority": "default",
+                              "Tags": "school"
+                          }
+                      )
+
+                      with urllib.request.urlopen(
+                          request,
+                          timeout=30
+                      ) as response:
+
+                          print(
+                              f"Notifica inviata: {title} "
+                              f"({response.status})"
+                          )
+
+                      seen.add(item["id"])
+
+                  # Mantiene al massimo gli ultimi 200 ID
+                  seen = set(list(seen)[-200:])
+
+                  STATE_FILE.write_text(
+                      json.dumps(list(seen), ensure_ascii=False)
+                  )
+          PY
+
+      - name: Salva lo stato aggiornato
+        uses: actions/cache/save@v4
+        with:
+          path: .rss-state
+          key: rss-state-${{ github.ref_name }}-${{ github.run_id }}
