@@ -2,8 +2,8 @@ name: Controllo circolari Torricelli
 
 on:
   schedule:
-    # Esegue ogni 20 minuti ai minuti 7, 27 e 47 (evita il traffico dei minuti tondi)
-    - cron: "7,27,47 * * * *"
+    # Esegue ogni 15 minuti, sfalsato per evitare i ritardi dei server GitHub
+    - cron: "8,23,38,53 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -24,7 +24,7 @@ jobs:
       - name: Configura Python
         uses: actions/setup-python@v5
         with:
-          python-python-version: '3.x'
+          python-version: '3.x'
 
       - name: Installa BeautifulSoup
         run: |
@@ -43,10 +43,8 @@ jobs:
           import time
           from pathlib import Path
           from bs4 import BeautifulSoup
-          from urllib.parse import urljoin, urlparse
 
           RSS_URL = "https://torricellimi.edu.it/feed/circolari.rss"
-          ARCHIVE_URL = "https://torricellimi.edu.it/circolari"
           TOPIC = os.environ["NTFY_TOPIC"]
           STATE_FILE = Path("seen.json")
           OUTPUT_DIR = Path("circolari")
@@ -205,3 +203,4 @@ jobs:
             git commit -m "Archivia circolari [skip ci]"
             git push
           fi
+          
