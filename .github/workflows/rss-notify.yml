@@ -29,7 +29,6 @@ jobs:
           import xml.etree.ElementTree as ET
           import json
           import os
-          import subprocess
           from pathlib import Path
 
           RSS_URL = "https://torricellimi.edu.it/feed/circolari.rss"
@@ -42,17 +41,13 @@ jobs:
               headers={"User-Agent": "Mozilla/5.0 RSS monitor"}
           )
 
-                    with urllib.request.urlopen(request, timeout=30) as response:
+          with urllib.request.urlopen(request, timeout=30) as response:
               data = response.read()
 
-          # Salva una copia del feed RSS originale per poterlo analizzare
-          Path("rss_feed.xml").write_bytes(data)
-
-          print("Feed RSS salvato in rss_feed.xml")
-          print("Dimensione feed:", len(data), "byte")
+          # Mostra il contenuto originale del feed
+          print("========== INIZIO FEED RSS ==========")
           print(data.decode("utf-8", errors="replace"))
-
-          root = ET.fromstring(data)
+          print("=========== FINE FEED RSS ===========")
 
           root = ET.fromstring(data)
 
