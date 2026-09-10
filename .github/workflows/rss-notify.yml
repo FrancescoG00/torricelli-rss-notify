@@ -20,7 +20,11 @@ jobs:
       - name: Scarica repository
         uses: actions/checkout@v5
 
-      - name: Controlla RSS e invia notifiche
+      - name: Installa BeautifulSoup
+        run: |
+          python3 -m pip install beautifulsoup4
+
+      - name: Controlla e archivia le circolari
         env:
           NTFY_TOPIC: torricelli_circolari_8f4k29m7x5q1z6
         run: |
@@ -29,151 +33,358 @@ jobs:
           import xml.etree.ElementTree as ET
           import json
           import os
+          import re
+          import time
           from pathlib import Path
+          from bs4 import BeautifulSoup
+          from urllib.parse import urljoin, urlparse
 
           RSS_URL = "https://torricellimi.edu.it/feed/circolari.rss"
+          ARCHIVE_URL = "https://torricellimi.edu.it/circolari"
           TOPIC = os.environ["NTFY_TOPIC"]
+
           STATE_FILE = Path("seen.json")
+          OUTPUT_DIR = Path("circolari")
+          OUTPUT_DIR.mkdir(exist_ok=True)
 
-          # Scarica il feed RSS
-          request = urllib.request.Request(
-              RSS_URL,
-              headers={"User-Agent": "Mozilla/5.0 RSS monitor"}
-          )
+          def download(url):
+              request = urllib.request.Request(
+                  url,
+                  headers={
+                      "User-Agent": "Mozilla/5.0 RSS monitor"
+                  }
+              )
 
-          with urllib.request.urlopen(request, timeout=30) as response:
-              data = response.read()
+              with urllib.request.urlopen(
+                  request,
+                  timeout=30
+              ) as response:
+                  return response.read()
 
-          # Mostra il contenuto originale del feed
-          print("========== INIZIO FEED RSS ==========")
-          print(data.decode("utf-8", errors="replace"))
-          print("=========== FINE FEED RSS ===========")
+          def clean_filename(text):
+              text = re.sub(r'[<>:"/\\|?*]', '', text)
+              text = re.sub(r'\s+', ' ', text).strip()
+              return text[:150]
 
-          root = ET.fromstring(data)
+          def extract_circular(url):
+              data = download(url)
 
-          # Legge le pubblicazioni
-          items = []
+              soup = BeautifulSoup(
+                  data,
+                  "html.parser"
+              )
+
+              title_tag = soup.find("h1")
+
+              if not title_tag:
+                  raise RuntimeError(
+                      "Titolo H1 non trovato"
+                  )
+
+              title = title_tag.get_text(
+                  " ",
+                  strip=True
+              )
+
+              # Cerca il contenitore principale dell'articolo.
+              content = None
+
+              for selector in [
+                  "main article",
+                  "article",
+                  "main"
+              ]:
+                  candidate = soup.select_one(selector)
+
+                  if candidate:
+                      content = candidate
+                      break
+
+              if content is None:
+                  raise RuntimeError(
+                      "Contenuto principale non trovato"
+                  )
+
+              # Elimina elementi che non fanno parte
+              # del testo della circolare.
+              for element in content.select(
+                  "script, style, nav, footer, header, "
+                  ".breadcrumb, .share, .social, "
+                  ".tags, .documents"
+              ):
+                  element.decompose()
+
+              # Prendiamo il testo mantenendo i paragrafi.
+              text = content.get_text(
+                  "\n",
+                  strip=True
+              )
+
+              # Rimuove righe duplicate/vuote consecutive.
+              lines = []
+
+              for line in text.splitlines():
+                  line = re.sub(r'\s+', ' ', line).strip()
+
+                  if not line:
+                      continue
+
+                  if lines and line == lines[-1]:
+                      continue
+
+                  lines.append(line)
+
+              text = "\n\n".join(lines)
+
+              return title, text
+
+          def save_circular(url, title):
+              title, text = extract_circular(url)
+
+              # Cerca un eventuale numero di circolare.
+              match = re.search(
+                  r'circolare\s+n\.?\s*(\d+)',
+                  title,
+                  re.IGNORECASE
+              )
+
+              if match:
+                  number = int(match.group(1))
+                  prefix = f"{number:04d}"
+              else:
+                  prefix = "senza-numero"
+
+              filename = (
+                  f"{prefix}-"
+                  f"{clean_filename(title)}.md"
+              )
+
+              path = OUTPUT_DIR / filename
+
+              content = (
+                  f"# {title}\n\n"
+                  f"**Pagina originale:** {url}\n\n"
+                  f"---\n\n"
+                  f"{text}\n"
+              )
+
+              path.write_text(
+                  content,
+                  encoding="utf-8"
+              )
+
+              print(f"Archiviata: {path}")
+
+              return path
+
+          # --------------------------------------------------
+          # 1. Legge il feed RSS
+          # --------------------------------------------------
+
+          rss_data = download(RSS_URL)
+          root = ET.fromstring(rss_data)
+
+          rss_items = []
 
           for item in root.findall(".//item"):
-              title = item.findtext("title", "").strip()
-              link = item.findtext("link", "").strip()
-              guid = item.findtext("guid", "").strip()
+              title = item.findtext(
+                  "title",
+                  ""
+              ).strip()
+
+              link = item.findtext(
+                  "link",
+                  ""
+              ).strip()
+
+              guid = item.findtext(
+                  "guid",
+                  ""
+              ).strip()
 
               identifier = guid or link or title
 
-              if identifier:
-                  items.append({
+              if identifier and link:
+                  rss_items.append({
                       "id": identifier,
                       "title": title,
                       "link": link
                   })
 
-          print(f"Elementi trovati nel feed: {len(items)}")
+          print(
+              f"Elementi presenti nel RSS: "
+              f"{len(rss_items)}"
+          )
 
-          if not items:
-              print("Nessun elemento nel feed.")
-              raise SystemExit(0)
+          # --------------------------------------------------
+          # 2. Legge lo stato precedente
+          # --------------------------------------------------
 
-          # Carica gli articoli già visti
           if STATE_FILE.exists():
               try:
-                  seen = set(json.loads(STATE_FILE.read_text()))
+                  seen = set(
+                      json.loads(
+                          STATE_FILE.read_text(
+                              encoding="utf-8"
+                          )
+                      )
+                  )
               except Exception:
                   seen = set()
           else:
-              seen = None
+              seen = set()
 
-          # Prima esecuzione:
-          # registra gli articoli esistenti senza notificare quelli vecchi.
-          if seen is None:
-              seen = {item["id"] for item in items}
+          first_run = not STATE_FILE.exists()
+
+          # --------------------------------------------------
+          # 3. Prima esecuzione:
+          #    archivia tutte le circolari del RSS
+          # --------------------------------------------------
+
+          if first_run:
+
+              print(
+                  "Prima esecuzione: "
+                  "archiviazione delle circolari esistenti."
+              )
+
+              for item in reversed(rss_items):
+
+                  try:
+                      save_circular(
+                          item["link"],
+                          item["title"]
+                      )
+
+                      seen.add(item["id"])
+
+                  except Exception as error:
+                      print(
+                          f"ERRORE con {item['link']}: "
+                          f"{error}"
+                      )
+
+                  time.sleep(0.5)
 
               STATE_FILE.write_text(
                   json.dumps(
                       sorted(seen),
                       ensure_ascii=False,
                       indent=2
-                  )
+                  ),
+                  encoding="utf-8"
               )
 
               print(
-                  f"Prima esecuzione: registrati {len(seen)} "
-                  "articoli senza inviare notifiche."
+                  f"Prima esecuzione completata. "
+                  f"Circolari archiviate: {len(seen)}"
               )
 
+          # --------------------------------------------------
+          # 4. Esecuzioni successive:
+          #    salva solo le nuove circolari
+          # --------------------------------------------------
+
           else:
+
               new_items = [
-                  item for item in items
+                  item
+                  for item in rss_items
                   if item["id"] not in seen
               ]
 
               if not new_items:
-                  print("Nessuna nuova circolare.")
 
-              else:
                   print(
-                      f"Nuove circolari trovate: {len(new_items)}"
+                      "Nessuna nuova circolare."
                   )
 
-                  # Invia prima le più vecchie
+              else:
+
+                  print(
+                      f"Nuove circolari: "
+                      f"{len(new_items)}"
+                  )
+
                   for item in reversed(new_items):
-                      message = (
-                          f'{item["title"]}\n'
-                          f'{item["link"]}'
-                      )
 
-                      request = urllib.request.Request(
-                          f"https://ntfy.sh/{TOPIC}",
-                          data=message.encode("utf-8"),
-                          method="POST",
-                          headers={
-                              "Title": "Nuova circolare Torricelli",
-                              "Priority": "default",
-                              "Tags": "school"
-                          }
-                      )
+                      try:
 
-                      with urllib.request.urlopen(
-                          request,
-                          timeout=30
-                      ) as response:
-                          if response.status != 200:
-                              raise RuntimeError(
-                                  f"ntfy ha restituito HTTP "
-                                  f"{response.status}"
-                              )
+                          save_circular(
+                              item["link"],
+                              item["title"]
+                          )
 
-                      print(
-                          f'Notifica inviata: {item["title"]}'
-                      )
+                          message = (
+                              f'{item["title"]}\n'
+                              f'{item["link"]}'
+                          )
 
-                      seen.add(item["id"])
+                          request = urllib.request.Request(
+                              f"https://ntfy.sh/{TOPIC}",
+                              data=message.encode(
+                                  "utf-8"
+                              ),
+                              method="POST",
+                              headers={
+                                  "Title":
+                                      "Nuova circolare Torricelli",
+                                  "Priority":
+                                      "default",
+                                  "Tags":
+                                      "school"
+                              }
+                          )
 
-                  # Mantieni gli ultimi 200 articoli
-                  seen = set(list(seen)[-200:])
+                          with urllib.request.urlopen(
+                              request,
+                              timeout=30
+                          ) as response:
+
+                              if response.status != 200:
+                                  raise RuntimeError(
+                                      f"ntfy HTTP "
+                                      f"{response.status}"
+                                  )
+
+                          seen.add(item["id"])
+
+                          print(
+                              f'Notifica inviata: '
+                              f'{item["title"]}'
+                          )
+
+                      except Exception as error:
+
+                          print(
+                              f"ERRORE con "
+                              f"{item['link']}: "
+                              f"{error}"
+                          )
+
+                      time.sleep(0.5)
 
                   STATE_FILE.write_text(
                       json.dumps(
                           sorted(seen),
                           ensure_ascii=False,
                           indent=2
-                      )
+                      ),
+                      encoding="utf-8"
                   )
-
-                  print("Stato aggiornato.")
 
           PY
 
-      - name: Salva lo stato nel repository
+      - name: Salva le circolari nel repository
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add seen.json
+          git add circolari seen.json
 
           if git diff --cached --quiet; then
-            echo "Nessuna modifica allo stato."
+            echo "Nessuna modifica."
           else
-            git commit -m "Aggiorna stato RSS"
+            git commit -m "Archivia circolari"
             git push
           fi
