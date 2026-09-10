@@ -42,8 +42,17 @@ jobs:
               headers={"User-Agent": "Mozilla/5.0 RSS monitor"}
           )
 
-          with urllib.request.urlopen(request, timeout=30) as response:
+                    with urllib.request.urlopen(request, timeout=30) as response:
               data = response.read()
+
+          # Salva una copia del feed RSS originale per poterlo analizzare
+          Path("rss_feed.xml").write_bytes(data)
+
+          print("Feed RSS salvato in rss_feed.xml")
+          print("Dimensione feed:", len(data), "byte")
+          print(data.decode("utf-8", errors="replace"))
+
+          root = ET.fromstring(data)
 
           root = ET.fromstring(data)
 
